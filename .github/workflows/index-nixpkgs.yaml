@@ -1,0 +1,57 @@
+name: Index nixpkgs-unstable
+run-name: Daily index update
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  check-channel:
+    name: Check for channel updates
+    runs-on: ubuntu-latest
+    outputs:
+      x86_64-darwin: ${{ steps.x86_64-darwin.outputs.[*] }}
+      x86_64-linux: ${{ steps.x86_64-linux.outputs.[*] }}
+    steps:
+      - name: Fetch nixpkgs-unstable channel history
+        run: curl --silent --show-error --fail --proto '=https' --tlsv1.2 --location https://channels.nix.gsc.io/nixpkgs-unstable/history-v2 > history.txt
+      - name: Parse channel history commit hashes
+        run: awk '{ print $1 }' < history.txt | sort > commits.txt
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::984256416385:role/GitHubActionsNixpkgsMetadataRole
+          aws-region: us-east-2
+          role-session-name: GitHubActionsIndexNixpkgs
+      - name: Fetch list of JSON files from S3
+        # List only the filenames as text (as opposed to JSON) to make them
+        # easier to parse in the next step.
+        run: aws s3api list-objects-v2 --bucket nixpkgs-metadata --query 'Contents[].[Key]' --output text > bucket.txt
+      - name: Parse S3 bucket commit hashes
+        # Split each filename by "-", "/", or "." to get the arch ($1), OS ($2), and commit hash ($4).
+        # Sort and append each commit hash to a file named after its system.
+        run: awk -F '-|/|\\.' '{ print $4 | ("sort > commits-" $1 "-" $2 ".txt") }' < bucket.txt
+      - name: Output x86_64-darwin commits
+        id: x86_64-darwin
+        run: comm -2 -3 commits.txt x86_64-darwin.txt | head -n2 > "$GITHUB_OUTPUT"
+      - name: Output x86_64-linux commits
+        id: x86_64-linux
+        run: comm -2 -3 commits.txt x86_64-linux.txt | head -n2 > "$GITHUB_OUTPUT"
+  update-x86_64-darwin:
+    runs-on: macos-latest
+    needs: check-channel
+    strategy:
+      matrix:
+        nixpkgs-commit: ${{ needs.check-channel.outputs.x86_64-darwin }}
+    steps:
+      - run: echo ${{ nixpkgs-commit }}
+  update-x86_64-linux:
+    runs-on: macos-latest
+    needs: check-channel
+    strategy:
+      matrix:
+        nixpkgs-commit: ${{ needs.check-channel.outputs.x86_64-linux }}
+    steps:
+      - run: echo ${{ nixpkgs-commit }}
